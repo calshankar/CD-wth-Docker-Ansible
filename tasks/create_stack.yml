@@ -1,0 +1,18 @@
+---
+- name: create stack
+  cloudformation:
+    stack_name: Apachewebapp 
+    state: present
+    template: templates/stack.yml
+    template_format: yaml
+    template_parameters:
+      VpcId: "{{ vpc_id }}"
+      SubnetId: "{{ subnet_id }}"
+      KeyPair: "{{ ec2_keypair }}"
+      InstanceCount: "{{ instance_count | default(1) }}"
+    tags:
+      Environment: demo
+  register: output_stack
+
+- debug: msg={{ output_stack }}
+  when: debug is defined

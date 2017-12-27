@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "DockerAppStack"
+
+# Stack Parameters
+Parameters:
+  VpcId: 
+    Type: "AWS::EC2::VPC::Id"
+    Description: "The target VPC Id"
+  SubnetId:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "The target Subnet Id in Availability Zone a"
+  KeyPair:
+    Type: "String"
+    Description: "The key pair that is allowed SSH access"
+  InstanceCount:
+    Type: "Number"
+    Description: "The desired number of application instances"
+
+# Stack Resources
+Resources:
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      VPCZoneIdentifier: [ { "Ref": "SubnetId" } ]
+      LaunchConfigurationName: { "Ref": "AutoScalingLaunchConfiguration" }
+      MinSize: 0
+      MaxSize: 1
+      DesiredCapacity: { "Ref": "InstanceCount" }
+      Tags:
+        - Key: "Name"
+          Value: { "Fn::Join": ["", [ { "Ref": "AWS::StackName" }, "-instance" ] ] }
+          PropagateAtLaunch: "true"
+  AutoScalingLaunchConfiguration:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      ImageId: ami-6944c513
+      InstanceType: t2.micro
+      KeyName: { "Ref": "KeyPair" }
+      IamInstanceProfile: { "Ref": "EC2InstanceProfile" }
+      SecurityGroups:
+        - { "Ref": "EC2InstanceSecurityGroup" }
+      UserData: {
+        "Fn::Base64": { "Fn::Join": ["", [
+          "#!/bin/bash\n",
+          "echo ECS_CLUSTER=", { "Ref" : "EcsCluster" }, " >> /etc/ecs/ecs.config\n"
+        ] ] }
+      }
+  EC2InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties: 
+      GroupDescription: "Appbackend-sg"
+      VpcId: { "Ref": "VpcId" }
+      SecurityGroupIngress: 
+        - IpProtocol: "tcp"
+          FromPort: "8000"
+          ToPort: "8000"
+          SourceSecurityGroupId: { "Ref": "ElbSecurityGroup" }
+        - IpProtocol: "tcp"
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: "0.0.0.0/0"
+      Tags: 
+        - Key: "Name"
+          Value: { "Fn::Join": ["", [ { "Ref": "AWS::StackName" }, "-instance-sg" ] ] }
+  EC2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: [ { "Ref": "EC2InstanceRole" } ]
+  EC2InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        ]
+      }
+      Path: "/"
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+  ElasticLoadBalancer:
+    Type: "AWS::ElasticLoadBalancing::LoadBalancer"
+    Properties:
+      CrossZone: "false"
+      SecurityGroups: [ { "Ref": "ElbSecurityGroup" } ]
+      Listeners:
+        - LoadBalancerPort: "80"
+          InstancePort: "8000"
+          Protocol: "http"
+      HealthCheck: 
+        Target: "HTTP:80/index.html"
+        HealthyThreshold: "2"
+        UnhealthyThreshold: "10"
+        Interval: "30"
+        Timeout: "5"
+      Subnets: [ { "Ref": "SubnetId" } ]
+      Tags: 
+        - Key: "Name"
+          Value: { "Fn::Join": ["", [ { "Ref": "AWS::StackName" }, "-elb" ] ] }
+  ElbSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Appbackend ELB Security Group"
+      VpcId: { "Ref": "VpcId" }
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: "0.0.0.0/0"
+      Tags: 
+        - Key: "Name"
+          Value: { "Fn::Join": ["", [ { "Ref": "AWS::StackName" }, "-elb-sg" ] ] }
+
+  EcsCluster:
+    Type: "AWS::ECS::Cluster"
+  AppTaskDefinition: 
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      ContainerDefinitions:
+        - Name: DockerWebApp
+          Image: calshankar/demo-app
+          Memory: 350
+          MountPoints:
+            - ContainerPath: /var/www/html/
+              SourceVolume: webroot
+          PortMappings:
+            - ContainerPort: "80"
+              HostPort: "8000"        
+      Volumes: 
+        - Name: webroot
+          Host: 
+            SourcePath: /ecs/webroot
+  AppbackendService:
+    Type: "AWS::ECS::Service"
+    Properties:
+      TaskDefinition: { "Ref": "AppTaskDefinition" }
+      Cluster: { "Ref": "EcsCluster" }
+      LoadBalancers:
+        - ContainerName: "DockerWebApp"
+          ContainerPort: "80"
+          LoadBalancerName: { "Ref": "ElasticLoadBalancer" }
+      Role: { "Ref": "EcsServiceRole" }
+      DesiredCount: 0
+  EcsServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [ "ecs.amazonaws.com" ]
+            },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        ]
+      }
+      Path: "/"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+
+# Stack Outputs
+Outputs:
+  ElbDomainName: 
+    Description: "Public DNS name of Elastic Load Balancer"
+    Value: { "Fn::GetAtt": [ "ElasticLoadBalancer", "DNSName" ] }
+  EcsCluster:
+    Description: "Amazon Resource Name (ARN) of Appbackend Ecs Cluster"
+    Value: { "Ref": "EcsCluster" }
+  AppTaskDefinition:
+    Description: "Amazon Resource Name (ARN) of Appbackend Task Definition"
+    Value: { "Ref": "AppTaskDefinition" }
+  AppbackendService: 
+    Description: "Amazon Resource Name (ARN) of Appbackend Service"
+    Value: { "Ref": "AppbackendService" }
